@@ -160,23 +160,52 @@ def safe_wilcoxon(diff_values, alternative):
     return TestResult(statistic=float(result.statistic), p_value=float(result.pvalue))
 
 
-def equivalence_test(diff_values, margin, alpha):
-    lower_test = paired_t_test(diff_values, alternative="greater", mu0=-margin)
-    upper_test = paired_t_test(diff_values, alternative="less", mu0=margin)
-    equivalent = bool(lower_test.p_value < alpha and upper_test.p_value < alpha)
-    return lower_test, upper_test, equivalent
+def better_worse_test(diff_values, alpha, metric_type="performance"):
+    """
+    Determine if DDT is significantly better, worse, or neither compared to baseline.
+    
+    Args:
+        diff_values: ddt_values - baseline_values
+        alpha: significance level
+        metric_type: 'performance' (higher is better) or 'cost' (lower is better)
+    
+    Returns:
+        Tuple: (test_better, test_worse, direction_label)
+        - direction_label: 'better', 'worse', or 'no_significant_difference'
+    """
+    if metric_type == "performance":
+        # For performance metrics: higher DDT is better
+        test_better = paired_t_test(diff_values, alternative="greater")  # DDT > baseline
+        test_worse = paired_t_test(diff_values, alternative="less")     # DDT < baseline
+    else:  # cost
+        # For cost: lower DDT is better
+        test_better = paired_t_test(diff_values, alternative="less")    # DDT < baseline (lower cost)
+        test_worse = paired_t_test(diff_values, alternative="greater")  # DDT > baseline (higher cost)
+    
+    is_better = not np.isnan(test_better.p_value) and test_better.p_value < alpha
+    is_worse = not np.isnan(test_worse.p_value) and test_worse.p_value < alpha
+    
+    if is_better:
+        direction = "better"
+    elif is_worse:
+        direction = "worse"
+    else:
+        direction = "no_significant_difference"
+    
+    return test_better, test_worse, direction
 
 
 def build_group_rows(dataset, group_label, paired_df, alpha, equivalence_margins):
     rows = []
 
+    # Compare performance metrics (higher is better)
     for metric in ["f1", "auroc", "sensitivity"]:
         baseline_values = paired_df[f"{metric}_baseline"].to_numpy(dtype=float)
         ddt_values = paired_df[f"{metric}_ddt"].to_numpy(dtype=float)
         diff_values = ddt_values - baseline_values
 
         ci_low, ci_high = confidence_interval(diff_values, alpha)
-        tost_lower, tost_upper, equivalent = equivalence_test(diff_values, equivalence_margins[metric], alpha)
+        test_better, test_worse, direction = better_worse_test(diff_values, alpha, metric_type="performance")
         paired_two_sided = paired_t_test(diff_values, alternative="two-sided")
         wilcoxon_two_sided = safe_wilcoxon(diff_values, alternative="two-sided")
 
@@ -191,29 +220,24 @@ def build_group_rows(dataset, group_label, paired_df, alpha, equivalence_margins
                 "mean_diff_ddt_minus_baseline": float(np.mean(diff_values)),
                 "ci_low": ci_low,
                 "ci_high": ci_high,
-                "test_family": "performance_equivalence",
-                "equivalence_margin": equivalence_margins[metric],
-                "paired_t_pvalue": paired_two_sided.p_value,
-                "paired_t_statistic": paired_two_sided.statistic,
+                "ddt_direction": direction,
+                "paired_t_pvalue_better": test_better.p_value,
+                "paired_t_statistic_better": test_better.statistic,
+                "paired_t_pvalue_worse": test_worse.p_value,
+                "paired_t_statistic_worse": test_worse.statistic,
                 "wilcoxon_pvalue": wilcoxon_two_sided.p_value,
                 "wilcoxon_statistic": wilcoxon_two_sided.statistic,
-                "tost_lower_pvalue": tost_lower.p_value,
-                "tost_upper_pvalue": tost_upper.p_value,
-                "equivalent": equivalent,
-                "significant_cost_reduction": np.nan,
             }
         )
 
+    # Compare cost metric (lower is better)
     cost_values_baseline = paired_df["cost_baseline"].to_numpy(dtype=float)
     cost_values_ddt = paired_df["cost_ddt"].to_numpy(dtype=float)
     cost_diff = cost_values_ddt - cost_values_baseline
     ci_low, ci_high = confidence_interval(cost_diff, alpha)
-    paired_less = paired_t_test(cost_diff, alternative="less")
-    wilcoxon_less = safe_wilcoxon(cost_diff, alternative="less")
-    significant_cost_reduction = bool(
-        (not np.isnan(paired_less.p_value) and paired_less.p_value < alpha)
-        and (not np.isnan(wilcoxon_less.p_value) and wilcoxon_less.p_value < alpha)
-    )
+    test_better, test_worse, direction = better_worse_test(cost_diff, alpha, metric_type="cost")
+    paired_two_sided = paired_t_test(cost_diff, alternative="two-sided")
+    wilcoxon_two_sided = safe_wilcoxon(cost_diff, alternative="two-sided")
 
     rows.append(
         {
@@ -226,16 +250,13 @@ def build_group_rows(dataset, group_label, paired_df, alpha, equivalence_margins
             "mean_diff_ddt_minus_baseline": float(np.mean(cost_diff)),
             "ci_low": ci_low,
             "ci_high": ci_high,
-            "test_family": "cost_reduction",
-            "equivalence_margin": np.nan,
-            "paired_t_pvalue": paired_less.p_value,
-            "paired_t_statistic": paired_less.statistic,
-            "wilcoxon_pvalue": wilcoxon_less.p_value,
-            "wilcoxon_statistic": wilcoxon_less.statistic,
-            "tost_lower_pvalue": np.nan,
-            "tost_upper_pvalue": np.nan,
-            "equivalent": np.nan,
-            "significant_cost_reduction": significant_cost_reduction,
+            "ddt_direction": direction,
+            "paired_t_pvalue_better": test_better.p_value,
+            "paired_t_statistic_better": test_better.statistic,
+            "paired_t_pvalue_worse": test_worse.p_value,
+            "paired_t_statistic_worse": test_worse.statistic,
+            "wilcoxon_pvalue": wilcoxon_two_sided.p_value,
+            "wilcoxon_statistic": wilcoxon_two_sided.statistic,
         }
     )
 
@@ -265,23 +286,15 @@ def write_outputs(result_df):
         summary_lines.append(f"Dataset: {dataset}")
         dataset_df = result_df[(result_df["dataset"] == dataset) & (result_df["group"] == "overall")]
         for _, row in dataset_df.iterrows():
-            if row["metric"] == "cost":
-                summary_lines.append(
-                    "  Cost: "
-                    f"baseline={row['baseline_mean']:.4f}, ddt={row['ddt_mean']:.4f}, "
-                    f"diff={row['mean_diff_ddt_minus_baseline']:.4f}, "
-                    f"paired_t_p={row['paired_t_pvalue']:.4g}, "
-                    f"wilcoxon_p={row['wilcoxon_pvalue']:.4g}, "
-                    f"significant_reduction={bool(row['significant_cost_reduction'])}"
-                )
-            else:
-                summary_lines.append(
-                    f"  {row['metric']}: "
-                    f"baseline={row['baseline_mean']:.4f}, ddt={row['ddt_mean']:.4f}, "
-                    f"diff={row['mean_diff_ddt_minus_baseline']:.4f}, "
-                    f"TOST=({row['tost_lower_pvalue']:.4g}, {row['tost_upper_pvalue']:.4g}), "
-                    f"equivalent={bool(row['equivalent'])}"
-                )
+            direction = row.get("ddt_direction", "unknown")
+            summary_lines.append(
+                f"  {row['metric']}: "
+                f"baseline={row['baseline_mean']:.4f}, ddt={row['ddt_mean']:.4f}, "
+                f"diff={row['mean_diff_ddt_minus_baseline']:.4f}, "
+                f"p_better={row['paired_t_pvalue_better']:.4g}, "
+                f"p_worse={row['paired_t_pvalue_worse']:.4g}, "
+                f"result={direction}"
+            )
         summary_lines.append("")
 
     summary_path = os.path.join(OUTPUT_DIR, "paired_significance_summary.txt")
