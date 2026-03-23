@@ -267,8 +267,6 @@ def run_tests(dataset, alpha, equivalence_margins):
     paired_df = load_paired_dataset(dataset)
 
     rows = []
-    rows.extend(build_group_rows(dataset, "overall", paired_df, alpha, equivalence_margins))
-
     for ratio, ratio_df in paired_df.groupby("ratio", sort=True):
         group_label = f"ratio_{ratio}"
         rows.extend(build_group_rows(dataset, group_label, ratio_df, alpha, equivalence_margins))
@@ -281,27 +279,7 @@ def write_outputs(result_df):
     overall_path = os.path.join(OUTPUT_DIR, "paired_significance_tests.csv")
     result_df.to_csv(overall_path, index=False)
 
-    summary_lines = []
-    for dataset in sorted(result_df["dataset"].unique()):
-        summary_lines.append(f"Dataset: {dataset}")
-        dataset_df = result_df[(result_df["dataset"] == dataset) & (result_df["group"] == "overall")]
-        for _, row in dataset_df.iterrows():
-            direction = row.get("ddt_direction", "unknown")
-            summary_lines.append(
-                f"  {row['metric']}: "
-                f"baseline={row['baseline_mean']:.4f}, ddt={row['ddt_mean']:.4f}, "
-                f"diff={row['mean_diff_ddt_minus_baseline']:.4f}, "
-                f"p_better={row['paired_t_pvalue_better']:.4g}, "
-                f"p_worse={row['paired_t_pvalue_worse']:.4g}, "
-                f"result={direction}"
-            )
-        summary_lines.append("")
-
-    summary_path = os.path.join(OUTPUT_DIR, "paired_significance_summary.txt")
-    with open(summary_path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(summary_lines).rstrip() + "\n")
-
-    return overall_path, summary_path
+    return overall_path
 
 
 def main():
@@ -317,9 +295,8 @@ def main():
         result_frames.append(run_tests(dataset, args.alpha, equivalence_margins))
 
     result_df = pd.concat(result_frames, ignore_index=True)
-    csv_path, summary_path = write_outputs(result_df)
+    csv_path = write_outputs(result_df)
     print(f"Saved paired test table to: {os.path.abspath(csv_path)}")
-    print(f"Saved paired test summary to: {os.path.abspath(summary_path)}")
 
 
 if __name__ == "__main__":
